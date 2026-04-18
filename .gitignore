@@ -1,8 +1,13 @@
 # Xmake cache
 .xmake/
+.direnv/
 .envrc
+.vscode/
+.cache/
+.claude/
+docs/
 build/
-third_party/
+
 # MacOS Cache
 .DS_Store
 

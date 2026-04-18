@@ -1,5 +1,5 @@
 {
-  description = "cl-editor development environment";
+  description = "cpp-fsrs development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -14,18 +14,15 @@
     {
       devShells.${system}.default = pkgs.mkShell {
         buildInputs = with pkgs; [
-          # Build tools
           xmake
           clang
           gcc
           pkg-config
-          python3
-          luajit
+          python3            # for running py-fsrs as a test oracle
+          luajit             # required by xmake
+          catch2_3           # fallback if xmake package fetch fails
+          nlohmann_json      # fallback if xmake package fetch fails
         ];
-
-        shellHook = ''
-          export PKG_CONFIG_PATH="${pkgs.sdl3.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
-        '';
       };
     };
 }
