@@ -1,0 +1,9 @@
+# Xmake cache
+.xmake/
+.envrc
+build/
+third_party/
+# MacOS Cache
+.DS_Store
+
+
