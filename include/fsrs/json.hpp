@@ -7,13 +7,17 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cctype>
+#include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <format>
-#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace fsrs {
 namespace detail {
@@ -40,21 +44,83 @@ inline std::string iso8601(Card::TimePoint tp) {
         static_cast<long long>(tod.seconds().count()), us);
 }
 
-// Parse ISO-8601 with optional fractional seconds and UTC offset "+00:00" or "Z".
+// Parse ISO-8601 with optional fractional seconds and a numeric UTC offset
+// of the form "+HH:MM" / "-HH:MM", or the shorthand "Z" (= "+00:00").
+// Implemented by hand because std::chrono::parse is only available in very
+// recent libc++ versions (libc++ 20+), which excludes Apple Clang on macOS.
 // Throws std::runtime_error on malformed input.
 inline Card::TimePoint parse_iso8601(std::string_view s) {
+    using namespace std::chrono;
+
+    auto bad = [&] {
+        return std::runtime_error(std::format("invalid ISO-8601 datetime: '{}'", s));
+    };
+
+    // Normalize a trailing 'Z' to "+00:00" so the offset parser has one shape.
     std::string buf{s};
     if (!buf.empty() && buf.back() == 'Z') {
         buf.pop_back();
         buf += "+00:00";
     }
-    std::istringstream in{buf};
-    Card::TimePoint tp;
-    in >> std::chrono::parse("%FT%T%Ez", tp);
-    if (in.fail()) {
-        throw std::runtime_error(std::format("invalid ISO-8601 datetime: '{}'", s));
+
+    // Fixed-width unsigned integer parse from a known position.
+    auto parse_uint = [](const char* p, std::size_t width, int& out) {
+        auto [ptr, ec] = std::from_chars(p, p + width, out);
+        return ec == std::errc{} && ptr == p + width;
+    };
+
+    // Minimum legal length: "YYYY-MM-DDTHH:MM:SS" (19) + "+HH:MM" (6) = 25.
+    if (buf.size() < 25) throw bad();
+
+    int y, mo, d, h, mi, se;
+    const char* p = buf.data();
+    if (!parse_uint(p,      4, y)  || p[4]  != '-' ||
+        !parse_uint(p +  5, 2, mo) || p[7]  != '-' ||
+        !parse_uint(p +  8, 2, d)  || p[10] != 'T' ||
+        !parse_uint(p + 11, 2, h)  || p[13] != ':' ||
+        !parse_uint(p + 14, 2, mi) || p[16] != ':' ||
+        !parse_uint(p + 17, 2, se)) {
+        throw bad();
     }
-    return tp;
+
+    // Optional ".f..." fractional seconds. Pad/truncate to microseconds (6 digits).
+    std::size_t pos = 19;
+    long long frac_us = 0;
+    if (pos < buf.size() && buf[pos] == '.') {
+        ++pos;
+        const std::size_t start = pos;
+        while (pos < buf.size() && std::isdigit(static_cast<unsigned char>(buf[pos]))) ++pos;
+        const std::size_t n = pos - start;
+        if (n == 0) throw bad();
+        char digits[7] = {'0','0','0','0','0','0','\0'};
+        for (std::size_t i = 0; i < n && i < 6; ++i) digits[i] = buf[start + i];
+        auto [_, ec] = std::from_chars(digits, digits + 6, frac_us);
+        if (ec != std::errc{}) throw bad();
+    }
+
+    // Offset must be exactly the trailing 6 chars: (+|-)HH:MM
+    if (pos + 6 != buf.size()) throw bad();
+    const char sign = buf[pos];
+    if (sign != '+' && sign != '-') throw bad();
+    int oh, om;
+    if (!parse_uint(buf.data() + pos + 1, 2, oh) || buf[pos + 3] != ':' ||
+        !parse_uint(buf.data() + pos + 4, 2, om)) {
+        throw bad();
+    }
+    if (oh > 23 || om > 59) throw bad();
+
+    const year_month_day ymd{year{y}, month{static_cast<unsigned>(mo)},
+                             day{static_cast<unsigned>(d)}};
+    if (!ymd.ok()) throw bad();
+    if (h > 23 || mi > 59 || se > 59) throw bad();
+
+    // Wall-clock time with the offset still attached, then subtract the
+    // offset to get UTC. "+05:00" means local is 5h ahead of UTC.
+    Card::TimePoint local = sys_days{ymd} + hours{h} + minutes{mi}
+                          + seconds{se} + microseconds{frac_us};
+    auto offset = hours{oh} + minutes{om};
+    if (sign == '-') offset = -offset;
+    return local - offset;
 }
 
 }  // namespace detail
